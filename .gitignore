@@ -1,0 +1,15 @@
+# Rust
+target/
+
+# Secrets
+.env
+cookies.txt
+
+# Logs
+*.log
+
+# Docker temp
+*.tmp
+
+# OS
+.DS_Store
