@@ -153,15 +153,39 @@ fn extract_tracks(output: youtube_dl::YoutubeDlOutput, source: TrackSource) -> V
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct FlatVideo {
     id: Option<String>,
     title: Option<String>,
     url: Option<String>,
+    #[serde(rename = "_type")]
+    entry_type: Option<String>,
     duration: Option<f64>,
     thumbnail: Option<String>,
     uploader: Option<String>,
     webpage_url: Option<String>,
+}
+
+fn looks_like_playlist_url(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    lower.contains("youtube.com/playlist") || lower.contains("list=")
+}
+
+fn is_single_video_candidate(video: &FlatVideo) -> bool {
+    if let Some(entry_type) = &video.entry_type {
+        let normalized = entry_type.to_lowercase();
+        if normalized.contains("playlist") || normalized.contains("channel") {
+            return false;
+        }
+    }
+
+    let url_is_playlist_like = video
+        .webpage_url
+        .as_deref()
+        .is_some_and(looks_like_playlist_url)
+        || video.url.as_deref().is_some_and(looks_like_playlist_url);
+
+    !url_is_playlist_like
 }
 
 async fn flat_search(
@@ -277,10 +301,19 @@ pub async fn resolve_query_to_tracks(
         return Ok(Vec::new());
     }
 
-    let tracks: Vec<Track> = videos
-        .into_iter()
+    let mut tracks: Vec<Track> = videos
+        .iter()
+        .filter(|video| is_single_video_candidate(video))
+        .cloned()
         .map(|v| flat_video_to_track(v, source))
         .collect();
+
+    if tracks.is_empty() {
+        tracks = videos
+            .into_iter()
+            .map(|v| flat_video_to_track(v, source))
+            .collect();
+    }
 
     for track in &tracks {
         info!(
@@ -307,7 +340,9 @@ pub async fn resolve_query_to_tracks(
 
 #[cfg(test)]
 mod tests {
-    use super::score_title_for_audio;
+    use super::{
+        is_single_video_candidate, looks_like_playlist_url, score_title_for_audio, FlatVideo,
+    };
 
     #[test]
     fn exact_title_match_beats_generic_audio_candidate() {
@@ -325,6 +360,46 @@ mod tests {
         let closer = "Juice WRLD - Never Understand Me (Audio)";
 
         assert!(score_title_for_audio(closer, query) > score_title_for_audio(partial, query));
+    }
+
+    #[test]
+    fn playlist_like_urls_are_detected() {
+        assert!(looks_like_playlist_url(
+            "https://www.youtube.com/playlist?list=PL123"
+        ));
+        assert!(looks_like_playlist_url(
+            "https://www.youtube.com/watch?v=abc123&list=PL123"
+        ));
+        assert!(!looks_like_playlist_url(
+            "https://www.youtube.com/watch?v=abc123"
+        ));
+    }
+
+    #[test]
+    fn playlist_entries_are_rejected_as_single_video_candidates() {
+        let playlist_entry = FlatVideo {
+            id: Some("abc123".to_string()),
+            title: Some("Track from playlist".to_string()),
+            url: Some("https://www.youtube.com/watch?v=abc123&list=PL1".to_string()),
+            entry_type: Some("playlist".to_string()),
+            duration: Some(100.0),
+            thumbnail: None,
+            uploader: None,
+            webpage_url: Some("https://www.youtube.com/watch?v=abc123&list=PL1".to_string()),
+        };
+        let single_video_entry = FlatVideo {
+            id: Some("xyz890".to_string()),
+            title: Some("Standalone track".to_string()),
+            url: Some("https://www.youtube.com/watch?v=xyz890".to_string()),
+            entry_type: Some("video".to_string()),
+            duration: Some(100.0),
+            thumbnail: None,
+            uploader: None,
+            webpage_url: Some("https://www.youtube.com/watch?v=xyz890".to_string()),
+        };
+
+        assert!(!is_single_video_candidate(&playlist_entry));
+        assert!(is_single_video_candidate(&single_video_entry));
     }
 }
 
