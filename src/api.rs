@@ -64,7 +64,7 @@ async fn handle_resolve_queue(
 
     let source_hint = body
         .source
-        .unwrap_or(crate::model::ResolveSourceHint::Soundcloud);
+        .unwrap_or(crate::model::ResolveSourceHint::Youtube);
 
     let is_http_url = query.starts_with("http://") || query.starts_with("https://");
     let is_spotify_url = is_http_url && query.contains("open.spotify.com");
@@ -131,7 +131,7 @@ async fn handle_enqueue_queue(
                 node: Some(app.node_info.clone()),
             }),
         )
-            .into_response();
+        .into_response();
     }
 
     let full_state = app.state.get_or_init(guild_id).await;
@@ -153,7 +153,7 @@ async fn handle_enqueue_queue(
 
     let source_hint = body
         .source
-        .unwrap_or(crate::model::ResolveSourceHint::Soundcloud);
+        .unwrap_or(crate::model::ResolveSourceHint::Youtube);
     let query = body.query.trim();
 
     let is_http_url = query.starts_with("http://") || query.starts_with("https://");
@@ -204,7 +204,7 @@ async fn handle_enqueue_queue(
                     node: full_state.node,
                 }),
             )
-                .into_response();
+            .into_response();
         }
     };
 
@@ -227,7 +227,11 @@ async fn handle_enqueue_queue(
         .clone();
     let _ = ws_tx.send(response_state.clone());
 
-    crate::resolve::preload::trigger_preload(app.state.clone(), guild_id, app.config.clone());
+    crate::resolve::preload::trigger_preload(
+        app.state.clone(),
+        guild_id,
+        app.config.clone(),
+    );
 
     let node_for_response = response_state
         .node
@@ -243,7 +247,7 @@ async fn handle_enqueue_queue(
             node: node_for_response,
         }),
     )
-        .into_response()
+    .into_response()
 }
 
 async fn handle_nodes(State(app): State<AppState>) -> impl IntoResponse {
@@ -251,7 +255,10 @@ async fn handle_nodes(State(app): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, Json(NodesResponse { nodes }))
 }
 
-async fn handle_get_state(Path(guild_id): Path<GuildId>, State(app): State<AppState>) -> Response {
+async fn handle_get_state(
+    Path(guild_id): Path<GuildId>,
+    State(app): State<AppState>,
+) -> Response {
     let current_state = app.state.as_response(guild_id).await;
     (StatusCode::OK, Json(current_state)).into_response()
 }
@@ -280,11 +287,7 @@ async fn handle_ws_socket(
     guild_id: GuildId,
 ) {
     let full_state = state.as_response(guild_id).await;
-    if full_state
-        .node
-        .as_ref()
-        .map_or(false, |n| n.id != node_info.id)
-    {
+    if full_state.node.as_ref().map_or(false, |n| n.id != node_info.id) {
         let error_json = r#"{"error": "Wrong node"}"#;
         let (mut sender, _) = socket.split();
         let _ = sender.send(Message::Text(error_json.to_string())).await;
