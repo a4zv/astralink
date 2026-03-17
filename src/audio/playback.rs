@@ -89,7 +89,6 @@ impl PlaybackRegistry {
                     }
                     let mut ytdlp = Command::new("yt-dlp");
                     ytdlp
-                        .arg("--no-playlist")
                         .arg("-f")
                         .arg("bestaudio")
                         .arg("-o")

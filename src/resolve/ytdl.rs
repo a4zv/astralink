@@ -409,7 +409,6 @@ pub async fn resolve_url_to_track(url: &str, source: TrackSource) -> Result<Vec<
     }
 
     let mut dl = YoutubeDl::new(url);
-    dl.extra_arg("--no-playlist");
     if let Some(cookies) = crate::config::yt_cookies_file() {
         dl.extra_arg("--cookies");
         dl.extra_arg(cookies);
