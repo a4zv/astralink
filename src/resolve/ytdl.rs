@@ -56,9 +56,41 @@ static TRACK_CACHE: Lazy<TrackCache> = Lazy::new(|| TrackCache {
     ttl: Duration::from_secs(600),
 });
 
-fn score_title_for_audio(title: &str) -> i32 {
+fn normalize_for_match(input: &str) -> String {
+    input
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+}
+
+fn score_title_for_audio(title: &str, original_query: &str) -> i32 {
     let lower = title.to_lowercase();
+    let normalized_title = normalize_for_match(title);
+    let normalized_query = normalize_for_match(original_query);
+
+    let query_tokens: Vec<&str> = normalized_query
+        .split_whitespace()
+        .filter(|token| token.len() >= 3)
+        .collect();
+
     let mut score = 0;
+
+    if !normalized_query.trim().is_empty() {
+        if normalized_title.contains(normalized_query.trim()) {
+            score += 140;
+        }
+
+        let matched_tokens = query_tokens
+            .iter()
+            .filter(|token| normalized_title.contains(**token))
+            .count() as i32;
+
+        score += matched_tokens * 14;
+
+        let missing_tokens = query_tokens.len() as i32 - matched_tokens;
+        score -= missing_tokens * 9;
+    }
 
     if lower.contains("official audio") {
         score += 60;
@@ -182,15 +214,13 @@ async fn flat_search(
 
 fn flat_video_to_track(video: FlatVideo, source: TrackSource) -> Track {
     let video_id = video.id.unwrap_or_default();
-    let webpage_url = video
-        .webpage_url
-        .or_else(|| {
-            if video_id.is_empty() {
-                None
-            } else {
-                Some(format!("https://www.youtube.com/watch?v={video_id}"))
-            }
-        });
+    let webpage_url = video.webpage_url.or_else(|| {
+        if video_id.is_empty() {
+            None
+        } else {
+            Some(format!("https://www.youtube.com/watch?v={video_id}"))
+        }
+    });
     let url = video
         .url
         .unwrap_or_else(|| webpage_url.clone().unwrap_or_default());
@@ -260,10 +290,10 @@ pub async fn resolve_query_to_tracks(
     }
 
     let mut best = &tracks[0];
-    let mut best_score = score_title_for_audio(&best.title);
+    let mut best_score = score_title_for_audio(&best.title, trimmed);
 
     for candidate in &tracks[1..] {
-        let score = score_title_for_audio(&candidate.title);
+        let score = score_title_for_audio(&candidate.title, trimmed);
         if score > best_score {
             best = candidate;
             best_score = score;
@@ -273,6 +303,29 @@ pub async fn resolve_query_to_tracks(
     TRACK_CACHE.insert(cache_key, best.clone());
 
     Ok(vec![best.clone()])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::score_title_for_audio;
+
+    #[test]
+    fn exact_title_match_beats_generic_audio_candidate() {
+        let query = "juice wrld never understand me";
+        let exact = "Juice WRLD - Never Understand Me ft. XXXTENTACION (Remix)";
+        let generic = "Random Chill Mix (Official Audio)";
+
+        assert!(score_title_for_audio(exact, query) > score_title_for_audio(generic, query));
+    }
+
+    #[test]
+    fn title_with_missing_query_tokens_is_penalized() {
+        let query = "juice wrld never understand me";
+        let partial = "Juice WRLD - New Song";
+        let closer = "Juice WRLD - Never Understand Me (Audio)";
+
+        assert!(score_title_for_audio(closer, query) > score_title_for_audio(partial, query));
+    }
 }
 
 pub async fn resolve_url_to_track(url: &str, source: TrackSource) -> Result<Vec<Track>, YtdlError> {
@@ -294,13 +347,10 @@ pub async fn resolve_url_to_track(url: &str, source: TrackSource) -> Result<Vec<
         dl.extra_arg(addr);
     }
 
-    let output = dl
-        .run_async()
-        .await
-        .map_err(|err| match err {
-            youtube_dl::Error::Io(_) => YtdlError::MissingBinary,
-            other => YtdlError::InvocationFailed(other.to_string()),
-        })?;
+    let output = dl.run_async().await.map_err(|err| match err {
+        youtube_dl::Error::Io(_) => YtdlError::MissingBinary,
+        other => YtdlError::InvocationFailed(other.to_string()),
+    })?;
 
     let tracks = extract_tracks(output, source);
 
