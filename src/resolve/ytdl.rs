@@ -32,6 +32,36 @@ struct TrackCache {
     ttl: Duration,
 }
 
+#[derive(Clone)]
+struct CachedPlaybackUrl {
+    url: String,
+    resolved_at: Instant,
+}
+
+struct PlaybackUrlCache {
+    entries: DashMap<String, CachedPlaybackUrl>,
+    ttl: Duration,
+}
+
+impl PlaybackUrlCache {
+    fn get(&self, key: &str) -> Option<String> {
+        let entry = self.entries.get(key)?;
+        if entry.resolved_at.elapsed() > self.ttl {
+            self.entries.remove(key);
+            return None;
+        }
+        Some(entry.url.clone())
+    }
+
+    fn insert(&self, key: String, url: String) {
+        let cached = CachedPlaybackUrl {
+            url,
+            resolved_at: Instant::now(),
+        };
+        self.entries.insert(key, cached);
+    }
+}
+
 impl TrackCache {
     fn get(&self, key: &str) -> Option<Track> {
         let entry = self.entries.get(key)?;
@@ -55,6 +85,77 @@ static TRACK_CACHE: Lazy<TrackCache> = Lazy::new(|| TrackCache {
     entries: DashMap::new(),
     ttl: Duration::from_secs(600),
 });
+
+static PLAYBACK_URL_CACHE: Lazy<PlaybackUrlCache> = Lazy::new(|| PlaybackUrlCache {
+    entries: DashMap::new(),
+    ttl: Duration::from_secs(600),
+});
+
+fn playback_cache_key(url: &str) -> String {
+    url.trim().to_string()
+}
+
+pub fn cached_playback_url(url: &str) -> Option<String> {
+    PLAYBACK_URL_CACHE.get(&playback_cache_key(url))
+}
+
+pub fn cache_playback_url(source_url: &str, playback_url: &str) {
+    PLAYBACK_URL_CACHE.insert(playback_cache_key(source_url), playback_url.to_string());
+}
+
+pub async fn resolve_playback_url(url: &str) -> Result<String, YtdlError> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(YtdlError::InvocationFailed("empty url".to_string()));
+    }
+
+    if let Some(cached) = cached_playback_url(trimmed) {
+        return Ok(cached);
+    }
+
+    let mut cmd = Command::new("yt-dlp");
+    cmd.arg("-g")
+        .arg("-f")
+        .arg("bestaudio[abr<=128]/bestaudio/best")
+        .arg("--no-playlist")
+        .arg("--socket-timeout")
+        .arg("8")
+        .arg("--retries")
+        .arg("2")
+        .arg("--no-warnings")
+        .arg(trimmed)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    if let Some(cookies) = crate::config::yt_cookies_file() {
+        cmd.arg("--cookies").arg(cookies);
+    }
+
+    if let Some(proxy) = crate::config::proxy_url() {
+        cmd.arg("--proxy").arg(proxy);
+    } else if let Some(addr) = crate::net::ipv6::random_source_addr() {
+        cmd.arg("--force-ipv6").arg("--source-address").arg(addr);
+    }
+
+    let output = cmd.output().await.map_err(|_| YtdlError::MissingBinary)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(YtdlError::InvocationFailed(stderr.trim().to_string()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let playback_url = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| YtdlError::ParseError("yt-dlp returned empty playback url".to_string()))?
+        .to_string();
+
+    cache_playback_url(trimmed, &playback_url);
+
+    Ok(playback_url)
+}
 
 fn normalize_for_match(input: &str) -> String {
     input
@@ -290,7 +391,7 @@ pub async fn resolve_query_to_tracks(
     }
 
     let count = match source {
-        TrackSource::Youtube => 3,
+        TrackSource::Youtube => 2,
         _ => 1,
     };
 

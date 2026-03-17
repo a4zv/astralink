@@ -1,5 +1,5 @@
+use soundcloud_rs::{query::TracksQuery, Client};
 use thiserror::Error;
-use soundcloud_rs::{Client, query::TracksQuery};
 
 use crate::model::{Track, TrackSource};
 

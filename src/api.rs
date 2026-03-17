@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
@@ -55,6 +56,7 @@ async fn handle_resolve_queue(
     State(app): State<AppState>,
     Json(body): Json<ResolveRequest>,
 ) -> impl IntoResponse {
+    let started_at = Instant::now();
     let query = body.query.trim();
 
     if query.is_empty() {
@@ -112,6 +114,11 @@ async fn handle_resolve_queue(
     };
 
     let response = ResolveResponse { tracks };
+    tracing::info!(
+        "ASTRALINK_RESOLVE_DONE guild_id={} elapsed_ms={}",
+        guild_id,
+        started_at.elapsed().as_millis()
+    );
     (StatusCode::OK, Json(response))
 }
 
@@ -120,6 +127,7 @@ async fn handle_enqueue_queue(
     State(app): State<AppState>,
     Json(body): Json<EnqueueRequest>,
 ) -> Response {
+    let started_at = Instant::now();
     if body.query.trim().is_empty() {
         let current_state = app.state.as_response(guild_id).await;
         return (
@@ -131,7 +139,7 @@ async fn handle_enqueue_queue(
                 node: Some(app.node_info.clone()),
             }),
         )
-        .into_response();
+            .into_response();
     }
 
     let full_state = app.state.get_or_init(guild_id).await;
@@ -194,6 +202,11 @@ async fn handle_enqueue_queue(
                 "ASTRALINK_ENQUEUE_FAILED guild_id={} source={:?} query=\"{}\" error=\"{}\"",
                 guild_id, source_hint, query, err
             );
+            tracing::info!(
+                "ASTRALINK_ENQUEUE_DONE guild_id={} success=false elapsed_ms={}",
+                guild_id,
+                started_at.elapsed().as_millis()
+            );
             let state = app.state.as_response(guild_id).await;
             return (
                 StatusCode::BAD_GATEWAY,
@@ -204,7 +217,7 @@ async fn handle_enqueue_queue(
                     node: full_state.node,
                 }),
             )
-            .into_response();
+                .into_response();
         }
     };
 
@@ -227,16 +240,18 @@ async fn handle_enqueue_queue(
         .clone();
     let _ = ws_tx.send(response_state.clone());
 
-    crate::resolve::preload::trigger_preload(
-        app.state.clone(),
-        guild_id,
-        app.config.clone(),
-    );
+    crate::resolve::preload::trigger_preload(app.state.clone(), guild_id, app.config.clone());
 
     let node_for_response = response_state
         .node
         .clone()
         .or_else(|| Some(app.node_info.clone()));
+
+    tracing::info!(
+        "ASTRALINK_ENQUEUE_DONE guild_id={} success=true elapsed_ms={}",
+        guild_id,
+        started_at.elapsed().as_millis()
+    );
 
     (
         StatusCode::OK,
@@ -247,7 +262,7 @@ async fn handle_enqueue_queue(
             node: node_for_response,
         }),
     )
-    .into_response()
+        .into_response()
 }
 
 async fn handle_nodes(State(app): State<AppState>) -> impl IntoResponse {
@@ -255,10 +270,7 @@ async fn handle_nodes(State(app): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, Json(NodesResponse { nodes }))
 }
 
-async fn handle_get_state(
-    Path(guild_id): Path<GuildId>,
-    State(app): State<AppState>,
-) -> Response {
+async fn handle_get_state(Path(guild_id): Path<GuildId>, State(app): State<AppState>) -> Response {
     let current_state = app.state.as_response(guild_id).await;
     (StatusCode::OK, Json(current_state)).into_response()
 }
@@ -287,7 +299,11 @@ async fn handle_ws_socket(
     guild_id: GuildId,
 ) {
     let full_state = state.as_response(guild_id).await;
-    if full_state.node.as_ref().map_or(false, |n| n.id != node_info.id) {
+    if full_state
+        .node
+        .as_ref()
+        .map_or(false, |n| n.id != node_info.id)
+    {
         let error_json = r#"{"error": "Wrong node"}"#;
         let (mut sender, _) = socket.split();
         let _ = sender.send(Message::Text(error_json.to_string())).await;
