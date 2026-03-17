@@ -71,10 +71,7 @@ struct SpotifyTracksPage {
     items: Vec<SpotifyTrack>,
 }
 
-async fn get_spotify_token(
-    client_id: &str,
-    client_secret: &str,
-) -> Result<String, SpotifyError> {
+async fn get_spotify_token(client_id: &str, client_secret: &str) -> Result<String, SpotifyError> {
     if let Ok(guard) = TOKEN_CACHE.lock() {
         if let Some(cached) = guard.as_ref() {
             if cached.expires_at > Instant::now() {
@@ -199,7 +196,9 @@ pub async fn resolve_spotify_query(
         .map_err(|err| SpotifyError::RequestFailed(err.to_string()))?;
 
     if !search_resp.status().is_success() {
-        return Err(SpotifyError::RequestFailed(search_resp.status().to_string()));
+        return Err(SpotifyError::RequestFailed(
+            search_resp.status().to_string(),
+        ));
     }
 
     let body: SpotifySearchResponse = search_resp
@@ -281,19 +280,14 @@ pub async fn resolve_spotify_url(
         return Ok(Vec::new());
     }
 
-    let track_id =
-        extract_spotify_track_id(url).ok_or_else(|| SpotifyError::RequestFailed(
-            "invalid spotify track url".to_string(),
-        ))?;
+    let track_id = extract_spotify_track_id(url)
+        .ok_or_else(|| SpotifyError::RequestFailed("invalid spotify track url".to_string()))?;
 
     let client = reqwest::Client::new();
     let access_token = get_spotify_token(client_id, client_secret).await?;
 
     let track_resp = client
-        .get(&format!(
-            "https://api.spotify.com/v1/tracks/{}",
-            track_id
-        ))
+        .get(&format!("https://api.spotify.com/v1/tracks/{}", track_id))
         .bearer_auth(access_token)
         .send()
         .await
@@ -326,10 +320,9 @@ pub async fn resolve_spotify_url(
         .and_then(|album| album.images.first())
         .map(|img| img.url.as_str());
 
-    let mut resolved =
-        super::ytdl::resolve_query_to_tracks(&query_string, TrackSource::Spotify)
-            .await
-            .map_err(|err| SpotifyError::RequestFailed(err.to_string()))?;
+    let mut resolved = super::ytdl::resolve_query_to_tracks(&query_string, TrackSource::Spotify)
+        .await
+        .map_err(|err| SpotifyError::RequestFailed(err.to_string()))?;
 
     let mut tracks = Vec::new();
 

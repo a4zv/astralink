@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use dashmap::DashMap;
 use serde::Deserialize;
@@ -103,12 +104,37 @@ async fn handle_connection(
         };
 
         let current_track_id = track.id;
+        let stream_started_at = Instant::now();
 
         info!(
             "ASTRALINK_AUDIO_START_STREAM guild_id={} title=\"{}\" url={}",
             guild_id, track.title, track.url
         );
 
+        let resolve_playback_started = Instant::now();
+        let playback_url = match crate::resolve::ytdl::resolve_playback_url(&track.url).await {
+            Ok(url) => {
+                info!(
+                    "ASTRALINK_AUDIO_PLAYBACK_URL_READY guild_id={} track_id={} elapsed_ms={}",
+                    guild_id,
+                    current_track_id,
+                    resolve_playback_started.elapsed().as_millis()
+                );
+                url
+            }
+            Err(err) => {
+                error!(
+                    "ASTRALINK_AUDIO_PLAYBACK_URL_FAILED guild_id={} track_id={} error={} elapsed_ms={}",
+                    guild_id,
+                    current_track_id,
+                    err,
+                    resolve_playback_started.elapsed().as_millis()
+                );
+                track.url.clone()
+            }
+        };
+
+        let ytdlp_started = Instant::now();
         let mut ytdlp_cmd = Command::new("yt-dlp");
         ytdlp_cmd
             .arg("-f")
@@ -116,7 +142,7 @@ async fn handle_connection(
             .arg("--no-part")
             .arg("-o")
             .arg("-")
-            .arg(&track.url)
+            .arg(&playback_url)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -127,9 +153,18 @@ async fn handle_connection(
         if let Some(proxy) = crate::config::sticky_proxy_url(&session_id) {
             ytdlp_cmd.arg("--proxy").arg(proxy);
         } else if let Some(addr) = crate::net::ipv6::random_source_addr() {
-            ytdlp_cmd.arg("--force-ipv6").arg("--source-address").arg(addr);
+            ytdlp_cmd
+                .arg("--force-ipv6")
+                .arg("--source-address")
+                .arg(addr);
         }
         let mut ytdlp_child = ytdlp_cmd.spawn()?;
+        info!(
+            "ASTRALINK_AUDIO_YTDLP_SPAWNED guild_id={} track_id={} elapsed_ms={}",
+            guild_id,
+            current_track_id,
+            ytdlp_started.elapsed().as_millis()
+        );
 
         let mut ytdlp_stdout = ytdlp_child
             .stdout
@@ -147,6 +182,7 @@ async fn handle_connection(
             buf
         });
 
+        let ffmpeg_started = Instant::now();
         let mut ffmpeg_child = Command::new("ffmpeg")
             .arg("-loglevel")
             .arg("error")
@@ -169,6 +205,12 @@ async fn handle_connection(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()?;
+        info!(
+            "ASTRALINK_AUDIO_FFMPEG_SPAWNED guild_id={} track_id={} elapsed_ms={}",
+            guild_id,
+            current_track_id,
+            ffmpeg_started.elapsed().as_millis()
+        );
 
         let mut ffmpeg_stdin = ffmpeg_child
             .stdin
@@ -195,6 +237,7 @@ async fn handle_connection(
 
         let mut pcm_buffer = [0u8; 3840];
         let mut frames = 0u64;
+        let mut first_frame_logged = false;
 
         let mut track_finished_naturally = false;
 
@@ -218,6 +261,15 @@ async fn handle_connection(
             match ffmpeg_stdout.read_exact(&mut pcm_buffer).await {
                 Ok(_) => {
                     frames += 1;
+                    if !first_frame_logged {
+                        first_frame_logged = true;
+                        info!(
+                            "ASTRALINK_AUDIO_FIRST_FRAME guild_id={} track_id={} startup_ms={}",
+                            guild_id,
+                            current_track_id,
+                            stream_started_at.elapsed().as_millis()
+                        );
+                    }
                     writer_half.write_all(&pcm_buffer).await?;
                     let _ = state.increment_position_ms(guild_id, 20).await;
                 }
@@ -255,6 +307,15 @@ async fn handle_connection(
             );
         }
 
+        if frames == 0 && playback_url != track.url {
+            crate::resolve::ytdl::cache_playback_url(&track.url, &track.url);
+            info!(
+                "ASTRALINK_AUDIO_PLAYBACK_URL_BYPASS guild_id={} track_id={} reason=no_frames",
+                guild_id, current_track_id
+            );
+            continue;
+        }
+
         if track_finished_naturally {
             let _ = state.advance_after_track_end(guild_id).await;
             let response_state = state.as_response(guild_id).await;
@@ -264,11 +325,15 @@ async fn handle_connection(
                 .clone();
             let _ = ws_tx.send(response_state);
 
-            crate::resolve::preload::trigger_preload(
-                state.clone(),
-                guild_id,
-                config.clone(),
-            );
+            crate::resolve::preload::trigger_preload(state.clone(), guild_id, config.clone());
         }
+
+        info!(
+            "ASTRALINK_AUDIO_STREAM_DONE guild_id={} track_id={} frames={} elapsed_ms={}",
+            guild_id,
+            current_track_id,
+            frames,
+            stream_started_at.elapsed().as_millis()
+        );
     }
 }

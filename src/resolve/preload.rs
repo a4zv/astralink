@@ -7,8 +7,7 @@ use uuid::Uuid;
 use crate::model::{GuildId, QueueItem};
 use crate::state::AstralinkState;
 
-static PRELOADING: once_cell::sync::Lazy<DashSet<Uuid>> =
-    once_cell::sync::Lazy::new(DashSet::new);
+static PRELOADING: once_cell::sync::Lazy<DashSet<Uuid>> = once_cell::sync::Lazy::new(DashSet::new);
 
 pub fn trigger_preload(
     state: Arc<AstralinkState>,
@@ -21,8 +20,7 @@ pub fn trigger_preload(
         let next_items: Vec<&QueueItem> = session
             .queue
             .iter()
-            .skip(1)
-            .take(2)
+            .take(3)
             .filter(|item| !PRELOADING.contains(&item.track.id))
             .collect();
 
@@ -40,18 +38,14 @@ pub fn trigger_preload(
                     guild_id, track.id, track.title
                 );
 
-                let result = super::ytdl::resolve_url_to_track(
-                    &track.url,
-                    track.source,
-                )
-                .await;
+                let result = super::ytdl::resolve_playback_url(&track.url).await;
 
                 match &result {
-                    Ok(tracks) => info!(
-                        "ASTRALINK_PRELOAD_DONE guild_id={} track_id={} resolved={}",
+                    Ok(playback_url) => info!(
+                        "ASTRALINK_PRELOAD_DONE guild_id={} track_id={} playback_url_len={}",
                         guild_id,
                         track.id,
-                        tracks.len()
+                        playback_url.len()
                     ),
                     Err(err) => info!(
                         "ASTRALINK_PRELOAD_FAILED guild_id={} track_id={} error={}",

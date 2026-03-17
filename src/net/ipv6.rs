@@ -89,7 +89,15 @@ pub fn detect_and_setup() -> anyhow::Result<()> {
     }
 
     let route_result = Command::new("ip")
-        .args(["-6", "route", "replace", "local", &route_target, "dev", "lo"])
+        .args([
+            "-6",
+            "route",
+            "replace",
+            "local",
+            &route_target,
+            "dev",
+            "lo",
+        ])
         .output();
 
     match route_result {
